@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+venv/
+build/
+dist/
+*.egg-info/
+
+# legacy data locations (now in the per-user platform dirs)
+settings.json
+history.jsonl
+models/

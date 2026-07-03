@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kalbukas"
+description = "Kalbukas — press a hotkey, speak Lithuanian or English — transcribed locally with Whisper and pasted into the focused app."
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["version"]
+dependencies = [
+    "faster-whisper==1.2.1",
+    "sounddevice==0.5.5",
+    "numpy==2.5.0",
+    "pynput==1.8.2",
+    "pyperclip==1.11.0",
+    "PySide6==6.11.1",
+    "anthropic==0.116.0",
+    "platformdirs==4.10.0",
+    "keyring==25.7.0",
+]
+
+[project.optional-dependencies]
+# NVIDIA CUDA 12 runtime — used automatically when present, CPU otherwise
+gpu = [
+    "nvidia-cublas-cu12==12.9.2.10; sys_platform != 'darwin'",
+    "nvidia-cudnn-cu12==9.24.0.43; sys_platform != 'darwin'",
+]
+# packaging toolchain (PyInstaller build + icon generation)
+build = [
+    "pyinstaller==6.21.0",
+    "pillow==12.3.0",
+]
+
+[tool.setuptools]
+packages = ["dictation", "dictation.ui"]
+
+[tool.setuptools.dynamic]
+version = { attr = "dictation.__version__" }

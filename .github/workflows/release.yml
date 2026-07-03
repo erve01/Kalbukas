@@ -1,0 +1,54 @@
+# Builds the Windows installers and macOS disk images and attaches them to
+# the GitHub release whenever a version tag (v1.2.3) is pushed.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: pip install .[gpu] pyinstaller
+      - name: Build CPU app
+        run: pyinstaller packaging/Kalbukas.spec --noconfirm
+      - name: Build GPU app
+        run: pyinstaller packaging/Kalbukas.spec --noconfirm
+        env:
+          LD_GPU: "1"
+      - name: Build installers
+        shell: cmd
+        run: |
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" packaging\installer.iss
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" /DGPU packaging\installer.iss
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Kalbukas-Setup-*.exe
+
+  macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-latest   # Apple Silicon (arm64)
+          - runner: macos-13       # Intel (x86_64)
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: pip install . pyinstaller
+      - name: Build .app
+        run: pyinstaller packaging/Kalbukas.spec --noconfirm
+      - name: Build .dmg
+        run: bash packaging/make_dmg.sh
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Kalbukas-*.dmg
