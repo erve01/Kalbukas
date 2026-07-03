@@ -6,6 +6,9 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: write   # the release step needs to create the release + upload assets
+
 jobs:
   windows:
     runs-on: windows-latest
