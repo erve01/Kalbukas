@@ -20,7 +20,6 @@ class History:
             # keep the pre-AI transcription only when it differs
             "raw": raw if raw != text else "",
             "language": settings.language,
-            "mode": settings.mode,
             "translate": settings.translate,
         })
         del self._entries[:-HISTORY_LIMIT]
@@ -29,6 +28,10 @@ class History:
     def entries(self) -> list[dict]:
         """Newest first."""
         return list(reversed(self._entries))
+
+    def recent_texts(self, count: int) -> list[str]:
+        """The last ``count`` dictations, oldest first — enhancer context."""
+        return [e["text"] for e in self._entries[-count:] if e.get("text")]
 
     def _read(self) -> list[dict]:
         entries: list[dict] = []

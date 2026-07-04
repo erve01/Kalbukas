@@ -7,7 +7,7 @@ from typing import Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from .. import __version__, config, hotkey, netlock, updates
+from .. import __version__, config, hotkey, updates
 from ..audio import list_microphones
 from .history_window import HistoryWindow
 from .shortcut_dialog import ShortcutDialog
@@ -16,6 +16,14 @@ _MODEL_OPTIONS = [("auto", "Auto (recommended)"),
                   ("large-v3", "Large — best accuracy"),
                   ("medium", "Medium — balanced"),
                   ("small", "Small — fastest")]
+
+_SILENCE_OPTIONS = [(seconds, "After %d s" % seconds if seconds else "Off")
+                    for seconds in config.SILENCE_TIMEOUT_CHOICES]
+
+_CONFIDENCE_OPTIONS = [("off", "Never"),
+                       ("low", "Only when very unsure"),
+                       ("medium", "When unsure (recommended)"),
+                       ("high", "Unless very sure")]
 
 
 def _make_icon() -> QtGui.QIcon:
@@ -61,11 +69,13 @@ class Tray(QtCore.QObject):
                     [("lt", "Lietuvių (LT)"), ("en", "English (EN)")])
         self._group("Output", "output",
                     [("paste", "Auto-paste into app"), ("clipboard", "Clipboard only")])
-        self._group("Mode", "mode",
-                    [("offline", "Offline"), ("online", "Online (AI cleanup)")])
         self._translate_actions = self._group(
-            "Translate (online)", "translate",
+            "Translate", "translate",
             [("off", "Off"), ("lt-en", "LT → EN"), ("en-lt", "EN → LT")])
+        self._group("Stop recording on silence", "silence_timeout",
+                    _SILENCE_OPTIONS)
+        self._group("Ask before using unclear text", "confidence",
+                    _CONFIDENCE_OPTIONS)
         self._model_actions = self._group("Model", "model", _MODEL_OPTIONS)
 
         menu.addSeparator()
@@ -146,21 +156,12 @@ class Tray(QtCore.QObject):
             group.addAction(action)
 
     # ---- handlers ---------------------------------------------------------
-    def _set(self, key: str, value: str | bool) -> None:
+    def _set(self, key: str, value: str | int | bool) -> None:
         if key == "model":
             self._set_model(value)
             return
         setattr(self._settings, key, value)
         self._settings.save()
-        if key == "mode":
-            netlock.apply(value)
-            if value == "online" and not self._settings.effective_api_key:
-                self.icon.showMessage(
-                    "No API key",
-                    "Use 'Set API key…' in this menu to add your Anthropic "
-                    "API key. Until then, dictations use the raw local "
-                    "transcription.",
-                    QtWidgets.QSystemTrayIcon.Warning, 6000)
         self._refresh()
 
     def _set_model(self, value: str) -> None:
@@ -236,12 +237,6 @@ class Tray(QtCore.QObject):
 
     # ---- update check -------------------------------------------------------
     def _check_updates(self) -> None:
-        if self._settings.mode == "offline":
-            self.icon.showMessage(
-                "Offline mode", "Switch to Online mode to check for updates — "
-                "offline mode blocks all network use.",
-                QtWidgets.QSystemTrayIcon.Information, 4000)
-            return
         threading.Thread(target=self._check_updates_bg, daemon=True).start()
 
     def _check_updates_bg(self) -> None:
@@ -272,21 +267,21 @@ class Tray(QtCore.QObject):
     # ---- shared -------------------------------------------------------------
     def _refresh(self) -> None:
         shortcut = hotkey.display(self._settings.hotkey)
-        online = self._settings.mode == "online"
+        has_key = bool(self._settings.effective_api_key)
         self._title.setText(self._status or "%s — press %s"
                             % (config.APP_DISPLAY_NAME, shortcut))
         self._hotkey_action.setText("Change shortcut…  (%s)" % shortcut)
         self._key_action.setText(
-            "Set API key…  (%s)" % ("set ✓" if self._settings.effective_api_key
-                                    else "not set"))
-        for action in self._translate_actions:
-            action.setEnabled(online)
+            "Set API key…  (%s)" % ("set ✓" if has_key else "not set"))
+        for action in self._translate_actions:  # translation runs via Claude
+            action.setEnabled(has_key)
+        cleanup = "AI cleanup" if has_key else "local only"
         translate = (", translate " + self._settings.translate
-                     if online and self._settings.translate != "off" else "")
+                     if has_key and self._settings.translate != "off" else "")
         status = " — " + self._status if self._status else ""
         self.icon.setToolTip("%s (%s) — %s, %s%s%s" % (
             config.APP_DISPLAY_NAME, shortcut, self._settings.language.upper(),
-            self._settings.mode, translate, status))
+            cleanup, translate, status))
 
     def _quit(self) -> None:
         self._controller.shutdown()

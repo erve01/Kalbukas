@@ -5,17 +5,21 @@ transcribed **locally** (OpenAI Whisper via faster-whisper) and pasted into
 whatever app has focus. A floating waveform overlay reacts to your voice while
 you talk.
 
-Optionally, an **online mode** sends the transcribed text (never the audio)
-to Claude for grammar/punctuation cleanup and LT↔EN translation.
+With an Anthropic API key set, the transcribed text (never the audio) is
+additionally sent to Claude for cleanup — misheard words, grammar,
+punctuation — and optional LT↔EN translation.
 
 ## Features
 
 - **F9 to dictate** (configurable shortcut) — works system-wide, pastes into the focused app or copies to clipboard
-- **Fully local transcription** — Whisper `large-v3` on your GPU (NVIDIA, automatic) or CPU; in offline mode the network is hard-blocked at the process level
-- **Online AI cleanup (optional)** — one Claude API call fixes transcription errors, grammar and diacritics; falls back to the raw transcription on any failure
-- **Translation (online)** — LT → EN or EN → LT
+- **Fully local transcription** — Whisper `large-v3` on your GPU (NVIDIA, automatic) or CPU
+- **Automatic transcript cleanup** — filler sounds ("uh", "um", "ėė"), stutter loops and Whisper's silence artifacts are stripped before the text is used
+- **Confidence check** — when Whisper isn't sure it heard right, a small dialog lets you confirm or fix the text before it goes anywhere
+- **Silence auto-stop** — optionally end the take after 5/10/15 s of silence, no second key press needed
+- **AI cleanup (optional)** — one Claude API call fixes misrecognized words using your recent dictations as context; falls back to the local transcription on any failure
+- **Translation** — LT → EN or EN → LT (uses Claude, needs an API key)
 - **Dictation history** — last 500 dictations, browsable/copyable from the tray
-- **System tray settings** — language, output mode, offline/online, translation, microphone, shortcut, API key
+- **System tray settings** — language, output, translation, silence timeout, confidence check, model, microphone, shortcut, API key
 
 ## Requirements
 
@@ -23,7 +27,7 @@ to Claude for grammar/punctuation cleanup and LT↔EN translation.
 - A microphone
 - ~3 GB disk for the Whisper `large-v3` model
 - Optional: NVIDIA GPU (much faster transcription)
-- Optional: an [Anthropic API key](https://console.anthropic.com/) for online mode
+- Optional: an [Anthropic API key](https://console.anthropic.com/) for AI cleanup/translation
 
 ## Install
 
@@ -32,12 +36,9 @@ git clone <this repo>
 cd local_dictation_ui
 python -m venv venv
 venv\Scripts\activate
-pip install faster-whisper sounddevice numpy pynput pyperclip PyQt5 anthropic
+pip install .            # or  pip install .[gpu]  on an NVIDIA machine
 
-# Optional GPU support (NVIDIA, CUDA 12) — used automatically when present:
-pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
-
-# One-time model download (~3 GB, needs internet):
+# One-time model download (~3 GB, needs internet) — also offered on first run:
 python main.py --download
 ```
 
@@ -59,22 +60,25 @@ All settings live in the **system tray icon** (right-click it):
 |---|---|
 | Language | Lithuanian or English transcription |
 | Output | Auto-paste into the focused app, or clipboard only |
-| Mode | Offline (network hard-blocked) or Online (AI cleanup via Claude) |
-| Translate | LT → EN / EN → LT (online mode only) |
+| Translate | LT → EN / EN → LT (needs an API key) |
+| Stop recording on silence | End the take automatically after 5/10/15 s of silence |
+| Ask before using unclear text | How unsure Whisper must be before you're asked to confirm the text |
+| Model | Whisper model size (auto/large/medium/small) |
 | Microphone | Pick a specific input device (refreshes live) |
 | Change shortcut… | Press any key/combo to make it the new dictation hotkey |
-| Set API key… | Paste your Anthropic API key for online mode |
+| Set API key… | Paste your Anthropic API key for AI cleanup and translation |
 | History… | Browse and copy your last 500 dictations |
 
-Settings persist in `settings.json`, history in `history.jsonl` — both next to
-the script. **Don't share `settings.json`; it contains your API key.**
+Settings and history live in the per-user data dir
+(`%LOCALAPPDATA%\Kalbukas` on Windows); the API key is stored in the OS
+credential store, never in a file.
 
 ## Privacy
 
-- **Offline mode:** nothing ever leaves your machine — the process' socket
-  layer is monkeypatched to raise on any network use.
-- **Online mode:** only the transcribed *text* is sent to the Anthropic API
-  for cleanup/translation. Audio never leaves your machine in either mode.
+- Transcription always runs **locally** — audio never leaves your machine.
+- With an API key set, only the transcribed *text* (plus your last few
+  dictations, as correction context) is sent to the Anthropic API for
+  cleanup/translation. Remove the key to keep everything on-device.
 
 ## Troubleshooting
 
@@ -84,25 +88,29 @@ the script. **Don't share `settings.json`; it contains your API key.**
 | Every dictation says "No speech" | The app is bound to a dead device — common when a Bluetooth headset went to sleep *after* startup. Pick the mic explicitly in tray → Microphone, or restart. |
 | `GPU load failed … falling back to CPU` | The CUDA wheels aren't installed (see Install) or the GPU is busy. The app still works, just slower. |
 | Text pastes garbled diacritics | Make sure the target app accepts Ctrl+V paste; try Output → Clipboard only and paste manually. |
-| Online mode does nothing | No API key set (tray → Set API key…), or no internet — the app silently falls back to the raw transcription. |
+| The confirm dialog appears too often | Lower the bar in tray → "Ask before using unclear text" (or pick a larger Whisper model — small models are less sure). |
+| AI cleanup does nothing | No API key set (tray → Set API key…), or no internet — the app silently falls back to the local transcription. |
 
 ## Project structure
 
 ```
 main.py      entry point
 dictation/
-  bootstrap.py             UTF-8 stdio, offline env vars, CUDA DLL paths
+  bootstrap.py             UTF-8 stdio, CUDA DLL paths
   config.py                constants + persisted Settings
-  netlock.py               reversible process-wide network lock
-  audio.py                 microphone discovery + Recorder
-  transcriber.py           faster-whisper wrapper (GPU→CPU fallback)
-  enhancer.py              Claude cleanup/translation (online mode)
+  audio.py                 microphone discovery + Recorder (voice/silence tracking)
+  transcriber.py           faster-whisper wrapper (GPU→CPU fallback, confidence)
+  textclean.py             deterministic transcript cleanup (fillers, stutter)
+  enhancer.py              Claude cleanup/translation with history context
   history.py               JSONL dictation history (capped at 500)
   hotkey.py                global hotkey strings + listener
+  updates.py               GitHub releases update check
   app.py                   Controller + main() wiring
   ui/
     overlay.py             floating waveform pill
     tray.py                tray icon + settings menu
+    review_dialog.py       low-confidence transcript confirm/fix
     shortcut_dialog.py     press-to-set shortcut capture
+    download_dialog.py     first-run model download
     history_window.py      history viewer
 ```

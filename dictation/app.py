@@ -5,7 +5,8 @@ Threading model — three concurrent threads coordinate through Qt signals:
 * Qt main thread     — owns all widgets; runs ``app.exec()``.
 * pynput threads     — the global hotkey fires ``Controller.toggled``.
 * worker thread      — one short-lived daemon per dictation runs Whisper
-                       (and Claude in online mode), then emits ``finished``.
+                       (and Claude when an API key is set), then emits
+                       ``finished``.
 
 Never touch widgets from the pynput/worker threads — always go through the
 Controller's signals.
@@ -26,9 +27,10 @@ from pynput import keyboard
 # Import order is load-bearing: ctranslate2 (via .transcriber / faster_whisper)
 # must load its DLLs before Qt loads its own — the reverse order segfaults
 # at CUDA model load on Windows. Keep every PySide6 import below this block.
-from . import enhancer, hotkey, logsetup, netlock
+from . import enhancer, hotkey, logsetup, textclean
 from .audio import Recorder
-from .config import APP_DISPLAY_NAME, DATA_DIR, SAMPLE_RATE, Settings
+from .config import (APP_DISPLAY_NAME, CONFIDENCE_THRESHOLDS, DATA_DIR,
+                     ENHANCER_CONTEXT_ENTRIES, SAMPLE_RATE, Settings)
 from .history import History
 from .hotkey import HotkeyListener
 from .transcriber import Transcriber, model_is_downloaded, resolve_model_size
@@ -37,6 +39,7 @@ from PySide6 import QtCore, QtWidgets
 
 from .ui.download_dialog import DownloadDialog
 from .ui.overlay import WaveOverlay
+from .ui.review_dialog import ReviewDialog
 from .ui.tray import Tray
 
 log = logging.getLogger(__name__)
@@ -58,7 +61,8 @@ class Controller(QtCore.QObject):
 
     toggled = QtCore.Signal()
     staged = QtCore.Signal(str)
-    finished = QtCore.Signal(str, str)  # final text, raw transcription
+    review = QtCore.Signal(str, float)  # shaky transcription, its confidence
+    finished = QtCore.Signal(str, str)  # final text, local transcription
     failed = QtCore.Signal(str)         # worker error, short user message
     notify = QtCore.Signal(str, str)    # tray balloon: title, message
     model_ready = QtCore.Signal()
@@ -73,8 +77,12 @@ class Controller(QtCore.QObject):
         self.transcriber: Transcriber | None = None  # set once loaded
         self._loading = False
         self.hotkeys = HotkeyListener(settings.hotkey, self.toggled.emit)
+        self._silence_timer = QtCore.QTimer(self)
+        self._silence_timer.setInterval(250)
+        self._silence_timer.timeout.connect(self._check_silence)
         self.toggled.connect(self._on_toggle)
         self.staged.connect(self._overlay.set_stage)
+        self.review.connect(self._on_review)
         self.finished.connect(self._on_finished)
         self.failed.connect(self._overlay.set_done)
 
@@ -112,9 +120,7 @@ class Controller(QtCore.QObject):
         if self.transcriber is not None and self.transcriber.model_size == size:
             return True
         if not model_is_downloaded(size):
-            accepted = DownloadDialog(size).exec() == QtWidgets.QDialog.Accepted
-            netlock.apply(self._settings.mode)  # restore after the download
-            if not accepted:
+            if DownloadDialog(size).exec() != QtWidgets.QDialog.Accepted:
                 return False
         self._loading = True
         threading.Thread(target=self._load_model_bg, args=(size,),
@@ -156,13 +162,27 @@ class Controller(QtCore.QObject):
                 return
             self._recorder.start_take()
             self._overlay.start()
+            if self._settings.silence_timeout:
+                self._silence_timer.start()
             log.info("* Recording...")
         else:
+            self._silence_timer.stop()
             audio = self._recorder.finish_take()
             self._overlay.set_stage("busy")
             log.info("... transcribing")
             threading.Thread(target=self._process, args=(audio,),
                              daemon=True).start()
+
+    def _check_silence(self) -> None:
+        """Main thread (QTimer): end the take after the configured stretch
+        of silence — a hands-free alternative to the second hotkey press."""
+        timeout = self._settings.silence_timeout
+        if not timeout or not self._recorder.recording:
+            self._silence_timer.stop()
+            return
+        if self._recorder.silence_seconds() >= timeout:
+            log.info("  auto-stop after %ds of silence", timeout)
+            self._on_toggle()
 
     def _reopen_mic(self) -> bool:
         """One quick recovery attempt (saved mic, then default) when the
@@ -177,25 +197,57 @@ class Controller(QtCore.QObject):
         return True
 
     def _process(self, audio: np.ndarray) -> None:
-        """Worker thread: local transcription, then optional AI cleanup."""
-        text = raw = ""
+        """Worker thread: local transcription + deterministic cleanup, then
+        either the low-confidence review or straight to finalization."""
+        text = ""
         try:
             if audio.size:
                 log.info("  captured %.1fs, peak level %.3f",
                          audio.size / SAMPLE_RATE, float(np.abs(audio).max()))
-                raw = self.transcriber.transcribe(audio, self._settings.language)
-                text = raw
-                if text and self._settings.mode == "online":
-                    self.staged.emit("ai")
-                    polished = enhancer.enhance(text, self._settings)
-                    if polished:
-                        text = polished
+                result = self.transcriber.transcribe(audio, self._settings.language)
+                text = textclean.clean(result.text, self._settings.language)
+                if text != result.text:
+                    log.info("  cleanup: %r -> %r", result.text, text)
+                threshold = CONFIDENCE_THRESHOLDS[self._settings.confidence]
+                if text and result.confidence < threshold:
+                    log.info("  confidence %.2f < %.2f - asking the user",
+                             result.confidence, threshold)
+                    self.review.emit(text, result.confidence)
+                    return
         except Exception:
             # never leave the overlay stuck on "busy" — report and recover
             log.exception("Dictation failed")
             self.failed.emit("Error — see log")
             return
-        self.finished.emit(text, raw)
+        self._finalize(text)
+
+    def _on_review(self, text: str, confidence: float) -> None:
+        """Main thread: the transcription was shaky — nothing goes to Claude
+        or the target app until the user confirms (and can fix) the text."""
+        self._overlay.stop()
+        confirmed = ReviewDialog.get_text(text, confidence)
+        if confirmed is None:
+            log.info("-> (discarded at review)")
+            return
+        # let focus return to the target app before a paste can fire
+        QtCore.QTimer.singleShot(200, lambda: threading.Thread(
+            target=self._finalize, args=(confirmed,), daemon=True).start())
+
+    def _finalize(self, text: str) -> None:
+        """Worker thread: optional AI cleanup of the confirmed local text."""
+        local = text
+        try:
+            if text and self._settings.effective_api_key:
+                self.staged.emit("ai")
+                context = self._history.recent_texts(ENHANCER_CONTEXT_ENTRIES)
+                polished = enhancer.enhance(text, self._settings, context)
+                if polished:
+                    text = polished
+        except Exception:
+            log.exception("Dictation failed")
+            self.failed.emit("Error — see log")
+            return
+        self.finished.emit(text, local)
 
     def _on_finished(self, text: str, raw: str) -> None:
         if not text:
@@ -248,14 +300,11 @@ def main() -> None:
         sys.exit(0)
 
     settings = Settings.load()
-    netlock.apply(settings.mode)
 
     model_size = resolve_model_size(settings.model)
     if not model_is_downloaded(model_size):
         _ensure_app()
-        accepted = DownloadDialog(model_size).exec() == QtWidgets.QDialog.Accepted
-        netlock.apply(settings.mode)  # restore after the sanctioned download
-        if not accepted:
+        if DownloadDialog(model_size).exec() != QtWidgets.QDialog.Accepted:
             sys.exit(0)
 
     app = _ensure_app()
@@ -286,9 +335,8 @@ def main() -> None:
     tray.set_status("Loading speech model…")
     controller.start(model_size)
 
-    log.info("Tray ready. Press %s to dictate (%s, %s) once the model is up.",
-             hotkey.display(settings.hotkey), settings.language.upper(),
-             settings.mode)
+    log.info("Tray ready. Press %s to dictate (%s) once the model is up.",
+             hotkey.display(settings.hotkey), settings.language.upper())
     exit_code = app.exec()
     controller.shutdown()
     sys.exit(exit_code)

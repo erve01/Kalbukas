@@ -17,6 +17,10 @@ log = logging.getLogger(__name__)
 
 ENV_LEN = 64  # samples in the rolling amplitude envelope
 
+# mean |amplitude| above which a block counts as voice rather than room
+# noise — drives the silence auto-stop (speech typically lands at 0.02+)
+VOICE_LEVEL = 0.012
+
 # Host APIs per platform, in preference order. Windows: WASAPI (full names,
 # connected devices only), then MME (Bluetooth mics vanish from WASAPI while
 # the headset is in music-only mode); WDM-KS is never used — it keeps dead
@@ -70,6 +74,7 @@ class Recorder:
                                                            maxlen=ENV_LEN)
         self._frames: list[np.ndarray] = []
         self._stream: Optional[sd.InputStream] = None
+        self._last_voice = 0.0  # monotonic time voice was last heard
 
     @property
     def ready(self) -> bool:
@@ -79,6 +84,7 @@ class Recorder:
     def start_take(self) -> None:
         self._frames = []
         self.levels.extend([0.0] * ENV_LEN)
+        self._last_voice = time.monotonic()  # the take starts the clock
         self.recording = True
 
     def finish_take(self) -> np.ndarray:
@@ -87,10 +93,17 @@ class Recorder:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(self._frames, axis=0).flatten()
 
+    def silence_seconds(self) -> float:
+        """Seconds since voice was last heard in the current take."""
+        return time.monotonic() - self._last_voice
+
     def _callback(self, indata, _frames, _time, _status) -> None:
         if self.recording:
             self._frames.append(indata.copy())
-            self.levels.append(float(np.abs(indata).mean()))
+            level = float(np.abs(indata).mean())
+            self.levels.append(level)
+            if level > VOICE_LEVEL:
+                self._last_voice = time.monotonic()
 
     # ---- stream lifecycle ----------------------------------------------
     def open(self, preferred_name: str, retries: int = 15) -> None:

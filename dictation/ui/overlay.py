@@ -49,10 +49,18 @@ class WaveOverlay(QtWidgets.QWidget):
 
     def set_stage(self, stage: str) -> None:
         self.state = stage
+        if not self.isVisible():  # e.g. resuming after the review dialog
+            self.opacity = 0.0
+            self.setWindowOpacity(0.0)
+            self.show()
+            self.timer.start(16)
 
     def set_done(self, msg: str) -> None:
         self.state = "done"
         self.msg = msg
+        if not self.isVisible():
+            self.setWindowOpacity(1.0)
+            self.show()
         self.update()
         QtCore.QTimer.singleShot(1100, self.stop)  # flash the result, then hide
 
@@ -154,18 +162,13 @@ class WaveOverlay(QtWidgets.QWidget):
         painter.setFont(font)
         painter.drawText(chip, QtCore.Qt.AlignCenter, self._settings.language.upper())
 
-        # mode dot (+ translate target), right side
-        online = self._settings.mode == "online"
-        dot_x = body.right() - 22
-        painter.setPen(QtCore.Qt.NoPen)
-        painter.setBrush(QtGui.QColor(94, 222, 146) if online
-                         else QtGui.QColor(255, 255, 255, 55))
-        painter.drawEllipse(QtCore.QPointF(dot_x, body.center().y() - 6), 3.5, 3.5)
-        if online and self._settings.translate != "off":
+        # translate target, right side
+        if self._settings.translate != "off":
             target = self._settings.translate.split("-")[1].upper()
             painter.setPen(QtGui.QColor(255, 255, 255, 120))
-            painter.drawText(QtCore.QRectF(dot_x - 16, body.center().y(), 32, 14),
-                             QtCore.Qt.AlignCenter, "→" + target)
+            painter.drawText(
+                QtCore.QRectF(body.right() - 38, body.center().y() - 7, 32, 14),
+                QtCore.Qt.AlignCenter, "→" + target)
 
     def _label(self, painter, body, text: str) -> None:
         painter.setPen(QtGui.QColor(235, 236, 240, 235))

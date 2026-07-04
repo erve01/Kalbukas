@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import math
 import os
 import sys
+from dataclasses import dataclass
 
 import numpy as np
 from faster_whisper import WhisperModel
@@ -58,7 +60,7 @@ def model_is_downloaded(size: str) -> bool:
 
 def download(size: str) -> None:
     """Blocking, resumable weight download (the only network use for models).
-    Callers own the UI and the netlock state."""
+    Callers own the UI."""
     _snapshot_download(size, cache_dir=config.MODEL_DIR, local_files_only=False)
 
 
@@ -73,6 +75,14 @@ def downloaded_bytes(size: str) -> int:
             except OSError:
                 pass
     return total
+
+
+@dataclass(frozen=True)
+class Transcription:
+    """One dictation's text plus how sure Whisper was about it (0..1)."""
+
+    text: str
+    confidence: float
 
 
 class Transcriber:
@@ -102,11 +112,29 @@ class Transcriber:
         log.info("Model '%s' on %s.", model_size,
                  "GPU (float16)" if self.device == "cuda" else "CPU (int8)")
 
-    def transcribe(self, audio: np.ndarray, language: str) -> str:
+    def transcribe(self, audio: np.ndarray, language: str) -> Transcription:
         segments, _ = self._model.transcribe(
             audio, language=language, beam_size=5,
             vad_filter=True,                    # skip silence -> fewer hallucinations
             condition_on_previous_text=False,   # short clips: avoid repetition loops
             initial_prompt=WHISPER_PROMPTS[language],
         )
-        return " ".join(s.text.strip() for s in segments).strip()
+        texts: list[str] = []
+        weights: list[float] = []       # segment durations
+        confidences: list[float] = []   # per-segment exp(avg_logprob)
+        for s in segments:
+            # Whisper's own "this was probably silence" signal — such segments
+            # are where the hallucinated caption phrases come from
+            if s.no_speech_prob > 0.6 and s.avg_logprob < -1.0:
+                log.info("  dropped low-quality segment: %r "
+                         "(no_speech %.2f, logprob %.2f)",
+                         s.text.strip(), s.no_speech_prob, s.avg_logprob)
+                continue
+            texts.append(s.text.strip())
+            weights.append(max(s.end - s.start, 0.1))
+            confidences.append(math.exp(min(s.avg_logprob, 0.0)))
+        if not texts:
+            return Transcription("", 0.0)
+        total = sum(weights)
+        confidence = sum(c * w for c, w in zip(confidences, weights)) / total
+        return Transcription(" ".join(texts).strip(), confidence)

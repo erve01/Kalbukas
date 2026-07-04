@@ -59,7 +59,7 @@ if sys.platform == "win32":
         kids=[
             StringFileInfo([StringTable("040904B0", [
                 StringStruct("ProductName", "Kalbukas"),
-                StringStruct("FileDescription", "Kalbukas — offline speech to text"),
+                StringStruct("FileDescription", "Kalbukas — local speech to text"),
                 StringStruct("ProductVersion", APP_VERSION),
                 StringStruct("FileVersion", APP_VERSION),
                 StringStruct("LegalCopyright", "© 2026 Ernestas"),

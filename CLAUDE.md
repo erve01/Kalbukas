@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**Kalbukas** — a Lithuanian/English dictation tool. Press the hotkey (default **F9**) to start recording (a floating waveform overlay reacts to your voice), press it again to stop — the audio is transcribed locally with faster-whisper (GPU float16 on NVIDIA, CPU int8 everywhere else) and the text is auto-pasted into the focused app or copied to the clipboard. A **system tray icon** holds all settings (language LT/EN, output mode, offline/online, translation, model size, microphone, shortcut, API key, history), persisted in the per-user data dir. In **online mode** the transcription is additionally polished (and optionally translated LT↔EN) by a single Claude API call (`claude-opus-4-8`) — with automatic fallback to the raw transcription on any API failure.
+**Kalbukas** — a Lithuanian/English dictation tool. Press the hotkey (default **F9**) to start recording (a floating waveform overlay reacts to your voice), press it again to stop — or let the configurable silence timeout stop it for you. The audio is transcribed locally with faster-whisper (GPU float16 on NVIDIA, CPU int8 everywhere else), cleaned up deterministically (fillers, stutter, hallucinated caption phrases), and the text is auto-pasted into the focused app or copied to the clipboard. When Whisper's confidence falls below the configurable threshold, a review dialog asks the user to confirm/fix the text before anything is sent to Claude or pasted. A **system tray icon** holds all settings (language LT/EN, output mode, translation, silence timeout, confidence check, model size, microphone, shortcut, API key, history), persisted in the per-user data dir. When an **Anthropic API key** is set, the transcription is additionally polished (and optionally translated LT↔EN) by a single Claude API call (`claude-opus-4-8`) that receives the user's recent dictations as terminology context — with automatic fallback to the local transcription on any API failure.
 
 ## Commands
 
@@ -46,17 +46,17 @@ macOS uses `~/Library/Application Support/Kalbukas` and `~/Library/Logs/Kalbukas
 | Module | Responsibility |
 |---|---|
 | `bootstrap.py` | UTF-8 stdio, CUDA DLL registration (venv wheels or PyInstaller `_internal/nvidia`). **Must run before anything imports faster_whisper.** |
-| `config.py` | Paths/constants, `Settings` dataclass (validated load, atomic save), keyring-backed `get_api_key()`/`set_api_key()`. |
+| `config.py` | Paths/constants, `Settings` dataclass (validated load, atomic save), keyring-backed `get_api_key()`/`set_api_key()`, confidence thresholds + silence-timeout choices. |
 | `logsetup.py` | Rotating file log + console; `install_crash_handlers()` routes unhandled exceptions (all threads) to crash files + a dialog. |
-| `netlock.py` | Reversible network lock: offline mode monkeypatches the socket layer. Model loads never need network (`local_files_only=True` everywhere). |
-| `audio.py` | `Recorder` + platform-aware mic enumeration (WASAPI→MME on Windows, Core Audio on macOS). Mics stored by **name**, not index. |
-| `transcriber.py` | `cuda_available()` (driver probe — no blind CUDA attempts), `resolve_model_size()` ("auto" → large-v3 on GPU / medium on CPU), `model_is_downloaded()`, `download()`, `Transcriber`. |
-| `enhancer.py` | One Claude call fixing errors/translating. **Returns None on any failure — never lose a dictation.** |
-| `history.py` | JSONL history capped at 500, atomic writes; tray can pause saving. |
+| `audio.py` | `Recorder` + platform-aware mic enumeration (WASAPI→MME on Windows, Core Audio on macOS). Mics stored by **name**, not index. Tracks when voice was last heard (`silence_seconds()`) for the auto-stop. |
+| `transcriber.py` | `cuda_available()` (driver probe — no blind CUDA attempts), `resolve_model_size()` ("auto" → large-v3 on GPU / medium on CPU), `model_is_downloaded()`, `download()`, `Transcriber` — returns a `Transcription` (text + 0..1 confidence), dropping segments Whisper flags as probable silence. Model loads never need network (`local_files_only=True` everywhere). |
+| `textclean.py` | Deterministic pre-AI cleanup: non-lexical fillers, 3+ word stutter loops, punctuation debris, whole-transcript hallucinations ("Ačiū, kad žiūrėjote"). Judgement calls are left to Claude. |
+| `enhancer.py` | One Claude call fixing errors/translating, fed the last few dictations as terminology context. **Returns None on any failure — never lose a dictation.** |
+| `history.py` | JSONL history capped at 500, atomic writes; tray can pause saving; `recent_texts()` feeds the enhancer context. |
 | `hotkey.py` | pynput hotkey strings + `HotkeyListener`. |
 | `updates.py` | GitHub-releases version check (enabled once `config.RELEASES_API_URL` is set). |
-| `app.py` | `Controller` (owns model lifecycle: background load, hot swap) + `main()` (single-instance QLockFile, tray-first startup). |
-| `ui/` | `overlay.py` (waveform pill), `tray.py` (settings menu, About, update check), `download_dialog.py` (first-run model download), `shortcut_dialog.py`, `history_window.py`. |
+| `app.py` | `Controller` (owns model lifecycle: background load, hot swap; dictation flow: transcribe → clean → confidence gate → optional review → optional Claude → paste) + `main()` (single-instance QLockFile, tray-first startup). |
+| `ui/` | `overlay.py` (waveform pill), `tray.py` (settings menu, About, update check), `review_dialog.py` (low-confidence confirm/fix/discard), `download_dialog.py` (first-run model download), `shortcut_dialog.py`, `history_window.py`. |
 
 ### Startup model (the main thing to understand)
 
@@ -67,7 +67,7 @@ macOS uses `~/Library/Application Support/Kalbukas` and `~/Library/Logs/Kalbukas
 - **Qt main thread** — owns all widgets, runs `app.exec()`. Tray/dialog handlers run here.
 - **pynput threads** — the global hotkey fires `Controller.toggled` (a Qt signal) to hop onto the main thread; never touch widgets from there.
 - **loader threads** — model load / mic open at startup and on hot swap; results come back via `model_ready` / `notify` signals.
-- **worker thread** — one short-lived daemon per dictation (`Controller._process`); wrapped in try/except so the overlay can never get stuck on "busy".
+- **worker thread** — one short-lived daemon per dictation (`Controller._process`); a second one runs `_finalize` when the low-confidence review dialog interrupts the flow. Both wrapped in try/except so the overlay can never get stuck on "busy".
 - **sounddevice callback thread** — `Recorder._callback` appends frames/levels while `recording` is true. Cross-thread state stays flag reads and appends (GIL-safe).
 
 ### Gotchas that keep coming back

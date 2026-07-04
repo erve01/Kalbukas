@@ -7,16 +7,15 @@ import threading
 
 from PySide6 import QtCore, QtWidgets
 
-from .. import netlock, transcriber
+from .. import transcriber
 from ..config import APP_DISPLAY_NAME, MODEL_DOWNLOAD_GB
 
 log = logging.getLogger(__name__)
 
 
 class DownloadDialog(QtWidgets.QDialog):
-    """Modal one-time model download. Network is only opened after the user
-    clicks Download; the caller restores the netlock afterwards. Cancelling
-    keeps the partial files — the next attempt resumes where it stopped."""
+    """Modal one-time model download. Cancelling keeps the partial files —
+    the next attempt resumes where it stopped."""
 
     _done = QtCore.Signal()
     _failed = QtCore.Signal(str)
@@ -60,7 +59,6 @@ class DownloadDialog(QtWidgets.QDialog):
             "Downloading the '%s' model… This can take a few minutes.\n"
             "A cancelled download resumes next time." % self._size)
         self._bar.show()
-        netlock.apply("online")  # the one sanctioned network use for models
         threading.Thread(target=self._work, daemon=True).start()
         self._timer.start(500)
 

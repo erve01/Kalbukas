@@ -55,6 +55,16 @@ WHISPER_PROMPTS = {
     "en": "Hello, this is an English dictation with correct punctuation.",
 }
 
+# auto-stop recording after this many seconds of silence (0 = never)
+SILENCE_TIMEOUT_CHOICES = (0, 5, 10, 15)
+
+# minimum transcription confidence (duration-weighted mean of the segments'
+# exp(avg_logprob)) before a dictation is finalized without asking the user
+CONFIDENCE_THRESHOLDS = {"off": 0.0, "low": 0.40, "medium": 0.55, "high": 0.70}
+
+# how many recent dictations are given to Claude as terminology context
+ENHANCER_CONTEXT_ENTRIES = 5
+
 
 def migrate_legacy_files() -> None:
     """One-time moves from older locations into the current platform dirs:
@@ -149,9 +159,10 @@ def set_api_key(value: str) -> bool:
 _CHOICES = {
     "language": ("lt", "en"),
     "output": ("paste", "clipboard"),
-    "mode": ("offline", "online"),
     "translate": ("off", "lt-en", "en-lt"),
     "model": ("auto",) + MODEL_CHOICES,
+    "silence_timeout": SILENCE_TIMEOUT_CHOICES,
+    "confidence": tuple(CONFIDENCE_THRESHOLDS),
 }
 
 
@@ -161,12 +172,13 @@ class Settings:
 
     language: str = "lt"       # "lt" | "en"
     output: str = "paste"      # "paste" (into the focused app) | "clipboard"
-    mode: str = "offline"      # "offline" | "online" (AI cleanup via Claude)
-    translate: str = "off"     # "off" | "lt-en" | "en-lt"  (online mode only)
+    translate: str = "off"     # "off" | "lt-en" | "en-lt"  (needs an API key)
     mic: str = ""              # preferred microphone name ("" = system default)
     hotkey: str = "<f9>"       # pynput format, e.g. "<f9>" or "<ctrl>+<alt>+d"
     save_history: bool = True  # privacy: dictations can be kept out of history
     model: str = "auto"        # "auto" | one of MODEL_CHOICES
+    silence_timeout: int = 0   # auto-stop after N s of silence (0 = off)
+    confidence: str = "medium" # review threshold: key of CONFIDENCE_THRESHOLDS
     mac_permissions_ack: bool = False  # one-time macOS permissions notice shown
 
     @classmethod
