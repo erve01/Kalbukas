@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import logging
 import sys
+import threading
 import time
 from typing import Optional
 
@@ -60,6 +61,21 @@ def find_mic_index(name: str) -> Optional[int]:
     return None
 
 
+# PortAudio snapshots the device list at init and never rescans on its own, so
+# a mic connected after startup stays invisible until it re-inits. Serialized:
+# it mutates PortAudio-global state that the startup open() retry loop also
+# touches, and concurrent terminate/init can crash the library.
+_pa_lock = threading.Lock()
+
+
+def refresh_devices() -> None:
+    """Force PortAudio to re-enumerate hardware. Drops every open stream, so
+    callers must have none (a live stream already sees its own device)."""
+    with _pa_lock:
+        sd._terminate()
+        sd._initialize()
+
+
 class Recorder:
     """Owns the input stream and the raw frames of the current take.
 
@@ -106,34 +122,51 @@ class Recorder:
                 self._last_voice = time.monotonic()
 
     # ---- stream lifecycle ----------------------------------------------
+    def _acquire(self, preferred_name: str, include_all: bool) -> bool:
+        """One pass at getting a stream: the saved mic, then the system
+        default, then (when ``include_all``) any input-capable device — a
+        reconnected Bluetooth headset is frequently present but *not* the
+        default. Installs the first that opens and returns True."""
+        candidates: list[Optional[int]] = []
+        preferred = find_mic_index(preferred_name)
+        if preferred is not None:
+            candidates.append(preferred)
+        candidates.append(None)  # None = system default
+        if include_all:
+            candidates += [i for i, d in enumerate(sd.query_devices())
+                           if d["max_input_channels"] > 0]
+        for device in candidates:
+            stream = self._try_open(device)
+            if stream is not None:
+                old, self._stream = self._stream, stream
+                self._close(old)
+                if device is not None:
+                    log.info("  using microphone: %s",
+                             sd.query_devices(device)["name"])
+                return True
+        return False
+
     def open(self, preferred_name: str, retries: int = 15) -> None:
         """Bluetooth mics drop off Windows' device list for a few seconds
         after a stream closes (profile renegotiation) — retry the preferred
         and default devices, re-enumerating each time, before falling back
         to any input-capable one."""
         for attempt in range(retries):
-            candidates: list[Optional[int]] = []
-            preferred = find_mic_index(preferred_name)
-            if preferred is not None:
-                candidates.append(preferred)
-            candidates.append(None)  # None = system default
-            if attempt >= 5:  # give the default (e.g. the headset) time to return
-                candidates += [i for i, d in enumerate(sd.query_devices())
-                               if d["max_input_channels"] > 0]
-            for device in candidates:
-                stream = self._try_open(device)
-                if stream is not None:
-                    self._stream = stream
-                    if device is not None:
-                        log.info("  using microphone: %s",
-                                 sd.query_devices(device)["name"])
-                    return
+            if self._acquire(preferred_name, include_all=attempt >= 5):
+                return
             log.info("  no microphone available - retrying (%d/%d)",
                      attempt + 1, retries)
             time.sleep(2)
-            sd._terminate()
-            sd._initialize()
+            refresh_devices()
         raise RuntimeError("No microphone found - connect one and restart.")
+
+    def reopen(self, preferred_name: str) -> bool:
+        """On-demand recovery when the stream is gone (e.g. a mic enabled
+        after a mic-less start): re-enumerate, then try the saved mic, the
+        default, and finally any input device — one quick pass, no blocking.
+        A device mid-profile-switch may still need a second call."""
+        self.rescan()
+        return self._acquire(preferred_name, include_all=True)
 
     def switch(self, name: str) -> Optional[str]:
         """Switch to the named device ("" = system default). Returns an error
@@ -148,6 +181,14 @@ class Recorder:
         old, self._stream = self._stream, stream
         self._close(old)
         return None
+
+    def rescan(self) -> None:
+        """Make a mic connected after startup visible to list_microphones()/
+        switch(). No-op while a stream is live: the re-init would drop it (and
+        knock Bluetooth mics offline for seconds), and its device is already
+        enumerable anyway. Safe after a mic-less start, where no stream exists."""
+        if self._stream is None:
+            refresh_devices()
 
     def close(self) -> None:
         self._close(self._stream)

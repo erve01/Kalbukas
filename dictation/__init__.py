@@ -1,3 +1,3 @@
 """Local Lithuanian/English dictation with a floating waveform overlay."""
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"

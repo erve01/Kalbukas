@@ -141,6 +141,7 @@ class Tray(QtCore.QObject):
 
     def _rebuild_mic_menu(self) -> None:
         self._mic_menu.clear()
+        self._recorder.rescan()  # surface a mic enabled after a mic-less start
         mics = list_microphones()
         if not mics:
             hint = self._mic_menu.addAction("(no microphones found)")

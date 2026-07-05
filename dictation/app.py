@@ -185,16 +185,18 @@ class Controller(QtCore.QObject):
             self._on_toggle()
 
     def _reopen_mic(self) -> bool:
-        """One quick recovery attempt (saved mic, then default) when the
-        stream is gone — e.g. the mic appeared after a mic-less startup."""
-        error = self._recorder.switch(self._settings.mic)
-        if error:
-            error = self._recorder.switch("")
-        if error:
-            self.notify.emit("Microphone", error + " Pick a device in the "
-                             "tray's Microphone menu.")
-            return False
-        return True
+        """Recover the mic after a mic-less start: re-enumerate, then try the
+        saved mic, the system default, and finally any input-capable device —
+        a Bluetooth headset often isn't the default when it reconnects. One
+        still switching to its handsfree profile may need a second press."""
+        if self._recorder.reopen(self._settings.mic):
+            return True
+        self.notify.emit(
+            "Microphone",
+            "Couldn't open a microphone yet. If you just connected one, press "
+            "%s again in a moment, or pick it in the tray's Microphone menu."
+            % hotkey.display(self._settings.hotkey))
+        return False
 
     def _process(self, audio: np.ndarray) -> None:
         """Worker thread: local transcription + deterministic cleanup, then
