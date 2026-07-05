@@ -22,6 +22,11 @@ ENV_LEN = 64  # samples in the rolling amplitude envelope
 # noise — drives the silence auto-stop (speech typically lands at 0.02+)
 VOICE_LEVEL = 0.012
 
+# A live input stream fires its callback continuously; if none has arrived for
+# this long the device was pulled mid-session (earbuds cased, headset off,
+# unplugged) even though the stream object still exists.
+STREAM_STALL_SECONDS = 1.0
+
 # Host APIs per platform, in preference order. Windows: WASAPI (full names,
 # connected devices only), then MME (Bluetooth mics vanish from WASAPI while
 # the headset is in music-only mode); WDM-KS is never used — it keeps dead
@@ -91,10 +96,23 @@ class Recorder:
         self._frames: list[np.ndarray] = []
         self._stream: Optional[sd.InputStream] = None
         self._last_voice = 0.0  # monotonic time voice was last heard
+        self._last_callback = 0.0  # monotonic time the audio callback last ran
 
     @property
     def ready(self) -> bool:
-        return self._stream is not None
+        """True only when a stream is open *and* actually delivering audio.
+        A Bluetooth device pulled mid-session (earbuds back in the case, headset
+        turned off) leaves the stream object in place but silent — report that
+        as not ready so the hotkey path re-acquires the reconnected device."""
+        stream = self._stream
+        if stream is None:
+            return False
+        try:
+            if not stream.active:
+                return False
+        except Exception:
+            return False
+        return time.monotonic() - self._last_callback < STREAM_STALL_SECONDS
 
     # ---- capture ------------------------------------------------------
     def start_take(self) -> None:
@@ -114,6 +132,7 @@ class Recorder:
         return time.monotonic() - self._last_voice
 
     def _callback(self, indata, _frames, _time, _status) -> None:
+        self._last_callback = time.monotonic()  # liveness — fires even when idle
         if self.recording:
             self._frames.append(indata.copy())
             level = float(np.abs(indata).mean())
@@ -161,10 +180,12 @@ class Recorder:
         raise RuntimeError("No microphone found - connect one and restart.")
 
     def reopen(self, preferred_name: str) -> bool:
-        """On-demand recovery when the stream is gone (e.g. a mic enabled
-        after a mic-less start): re-enumerate, then try the saved mic, the
-        default, and finally any input device — one quick pass, no blocking.
-        A device mid-profile-switch may still need a second call."""
+        """On-demand recovery when the stream is gone or dead (mic enabled after
+        a mic-less start, or earbuds cased then taken out again): drop any stale
+        stream, re-enumerate, then try the saved mic, the default, and finally
+        any input device — one quick pass, no blocking. A device still switching
+        to its handsfree profile may need a second call."""
+        self.close()  # a dead stream must go before rescan() can re-enumerate
         self.rescan()
         return self._acquire(preferred_name, include_all=True)
 
@@ -201,6 +222,7 @@ class Recorder:
                                     dtype="float32", callback=self._callback,
                                     device=device)
             stream.start()  # disconnected BT endpoints open fine but fail here
+            self._last_callback = time.monotonic()  # grace until first callback
             return stream
         except sd.PortAudioError:
             if stream is not None:
