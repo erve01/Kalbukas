@@ -159,6 +159,7 @@ def set_api_key(value: str) -> bool:
 _CHOICES = {
     "language": ("lt", "en"),
     "output": ("paste", "clipboard"),
+    "mode": ("offline", "online"),
     "translate": ("off", "lt-en", "en-lt"),
     "model": ("auto",) + MODEL_CHOICES,
     "silence_timeout": SILENCE_TIMEOUT_CHOICES,
@@ -172,7 +173,8 @@ class Settings:
 
     language: str = "lt"       # "lt" | "en"
     output: str = "paste"      # "paste" (into the focused app) | "clipboard"
-    translate: str = "off"     # "off" | "lt-en" | "en-lt"  (needs an API key)
+    mode: str = "offline"      # "offline" (network blocked) | "online" (AI cleanup via Claude)
+    translate: str = "off"     # "off" | "lt-en" | "en-lt"  (online mode only)
     mic: str = ""              # preferred microphone name ("" = system default)
     hotkey: str = "<f9>"       # pynput format, e.g. "<f9>" or "<ctrl>+<alt>+d"
     save_history: bool = True  # privacy: dictations can be kept out of history

@@ -27,7 +27,7 @@ from pynput import keyboard
 # Import order is load-bearing: ctranslate2 (via .transcriber / faster_whisper)
 # must load its DLLs before Qt loads its own — the reverse order segfaults
 # at CUDA model load on Windows. Keep every PySide6 import below this block.
-from . import enhancer, hotkey, logsetup, textclean
+from . import enhancer, hotkey, logsetup, netlock, textclean
 from .audio import Recorder
 from .config import (APP_DISPLAY_NAME, CONFIDENCE_THRESHOLDS, DATA_DIR,
                      ENHANCER_CONTEXT_ENTRIES, SAMPLE_RATE, Settings)
@@ -120,7 +120,12 @@ class Controller(QtCore.QObject):
         if self.transcriber is not None and self.transcriber.model_size == size:
             return True
         if not model_is_downloaded(size):
-            if DownloadDialog(size).exec() != QtWidgets.QDialog.Accepted:
+            netlock.apply("online")  # a sanctioned model download needs the network
+            try:
+                accepted = DownloadDialog(size).exec() == QtWidgets.QDialog.Accepted
+            finally:
+                netlock.apply(self._settings.mode)  # restore the user's mode
+            if not accepted:
                 return False
         self._loading = True
         threading.Thread(target=self._load_model_bg, args=(size,),
@@ -239,7 +244,8 @@ class Controller(QtCore.QObject):
         """Worker thread: optional AI cleanup of the confirmed local text."""
         local = text
         try:
-            if text and self._settings.effective_api_key:
+            if (text and self._settings.mode == "online"
+                    and self._settings.effective_api_key):
                 self.staged.emit("ai")
                 context = self._history.recent_texts(ENHANCER_CONTEXT_ENTRIES)
                 polished = enhancer.enhance(text, self._settings, context)
@@ -308,6 +314,8 @@ def main() -> None:
         _ensure_app()
         if DownloadDialog(model_size).exec() != QtWidgets.QDialog.Accepted:
             sys.exit(0)
+
+    netlock.apply(settings.mode)  # Offline mode hard-blocks the network from here on
 
     app = _ensure_app()
 
